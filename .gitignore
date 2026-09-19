@@ -1,5 +1,0 @@
-out/
-cache/
-# lib/ holds the forge-std submodule — run: git submodule update --init --recursive
-broadcast/
-.env
