@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HeatBoard — support that cools down</title>
+<style>
+  :root {
+    --bg: #0b0710; --panel: #150e1d; --line: #2a1f38;
+    --text: #efe9f5; --muted: #9b8fae; --accent: #836ef9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 20px 64px; background: var(--bg); color: var(--text);
+    font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 680px; margin: 0 auto; }
+  h1 { font-size: 30px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .tagline { color: var(--muted); margin: 0 0 28px; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); font-weight: 500; }
+  .bar { display: flex; gap: 10px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+  .addr { color: var(--muted); font-family: ui-monospace, monospace; font-size: 13px; }
+  .entry {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 10px;
+  }
+  .row { display: flex; align-items: center; gap: 12px; }
+  .name { font-weight: 600; flex: 1; }
+  .heat { font-family: ui-monospace, monospace; color: var(--accent); min-width: 72px; text-align: right; }
+  .meter { height: 6px; background: #241a31; border-radius: 3px; margin-top: 10px; overflow: hidden; }
+  .meter > div { height: 100%; background: linear-gradient(90deg, var(--accent), #d9c8ff); transition: width .25s linear; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  form { display: flex; gap: 8px; margin: 24px 0 8px; }
+  input {
+    flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 12px; color: var(--text); font: inherit;
+  }
+  .status { color: var(--muted); font-size: 13px; min-height: 20px; margin-top: 12px; }
+  .note { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); margin-top: 32px; padding-top: 16px; }
+  code { font-family: ui-monospace, monospace; color: var(--text); }
+</style>
+</head>
+<body>
+<main>
+  <h1>HeatBoard</h1>
+  <p class="tagline">A leaderboard where support cools down. Heat from a cheer fades to zero in one hour — stay on top only while people still care.</p>
+
+  <div class="bar">
+    <button id="connect">Connect wallet</button>
+    <span class="addr" id="account"></span>
+  </div>
+
+  <div id="list"></div>
+
+  <form id="create">
+    <input id="name" placeholder="Add an entry to the board…" maxlength="48" />
+    <button class="ghost" type="submit">Add</button>
+  </form>
+
+  <div class="status" id="status"></div>
+
+  <p class="note">
+    Contract <code id="contract"></code> on Monad Testnet (chain 10143).
+    A cheer costs one transaction and you may cheer the same entry again every 30 seconds.
+    The bar you see decays locally every 200 ms; the chain agrees on read.
+  </p>
+</main>
+
+<script type="module">
+import { ethers } from "https://esm.sh/ethers@6.13.4";
+
+// Replace after `forge script script/Deploy.s.sol` — see README.
+const CONTRACT = "0x79198170A856B43A564344536Fa68e1602946DC3";
+
+const CHAIN = {
+  chainId: "0x279f",
+  chainName: "Monad Testnet",
+  nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
+  rpcUrls: ["https://testnet-rpc.monad.xyz"],
+  blockExplorerUrls: ["https://testnet.monadexplorer.com"],
+};
+
+const ABI = [
+  "function board() view returns (string[] names, uint256[] heat, uint64[] cheers, address[] creators)",
+  "function cheer(uint256 id)",
+  "function createEntry(string name) returns (uint256)",
+  "function cooldownLeft(uint256 id, address fan) view returns (uint256)",
+  "function DECAY_WINDOW() view returns (uint256)",
+];
+
+const DECAY_WINDOW = 3600; // seconds, mirrors the contract constant
+const $ = (id) => document.getElementById(id);
+const say = (msg) => ($("status").textContent = msg);
+
+$("contract").textContent = CONTRACT;
+
+const readProvider = new ethers.JsonRpcProvider(CHAIN.rpcUrls[0], 10143);
+const reader = new ethers.Contract(CONTRACT, ABI, readProvider);
+let signer = null;
+let writer = null;
+
+// Last board read, plus the wall-clock time we read it, so heat can be
+// interpolated between polls instead of stepping once per refresh.
+let snapshot = { entries: [], at: 0 };
+
+async function connect() {
+  if (!window.ethereum) return say("No injected wallet found. Install MetaMask.");
+  try {
+    await window.ethereum.request({ method: "wallet_addEthereumChain", params: [CHAIN] });
+    const browserProvider = new ethers.BrowserProvider(window.ethereum);
+    signer = await browserProvider.getSigner();
+    writer = new ethers.Contract(CONTRACT, ABI, signer);
+    const addr = await signer.getAddress();
+    $("account").textContent = addr.slice(0, 6) + "…" + addr.slice(-4);
+    $("connect").textContent = "Connected";
+    say("");
+  } catch (err) {
+    say(err.shortMessage || err.message);
+  }
+}
+
+async function refresh() {
+  try {
+    const [names, heat, cheers] = await reader.board();
+    snapshot = {
+      at: Date.now(),
+      entries: names.map((name, i) => ({
+        id: i,
+        name,
+        heat: Number(ethers.formatEther(heat[i])),
+        cheers: Number(cheers[i]),
+      })),
+    };
+    render();
+  } catch (err) {
+    say("Could not read the board — is CONTRACT set to your deployment? " + (err.shortMessage || ""));
+  }
+}
+
+// Heat decays linearly, so between two reads we can subtract elapsed time locally.
+function liveHeat(entry) {
+  const elapsed = (Date.now() - snapshot.at) / 1000;
+  return Math.max(0, entry.heat * (1 - elapsed / DECAY_WINDOW));
+}
+
+function render() {
+  const ranked = [...snapshot.entries].sort((a, b) => liveHeat(b) - liveHeat(a));
+  const hottest = Math.max(1, ...ranked.map(liveHeat));
+
+  $("list").innerHTML = ranked
+    .map((e) => {
+      const h = liveHeat(e);
+      return `<div class="entry">
+        <div class="row">
+          <span class="name">${escapeHtml(e.name)}</span>
+          <span class="heat">${h.toFixed(3)}</span>
+          <button data-id="${e.id}">Cheer</button>
+        </div>
+        <div class="meter"><div style="width:${(h / hottest) * 100}%"></div></div>
+        <div class="meta">${e.cheers} cheer${e.cheers === 1 ? "" : "s"} all-time</div>
+      </div>`;
+    })
+    .join("");
+
+  for (const btn of $("list").querySelectorAll("button[data-id]")) {
+    btn.disabled = !writer;
+    btn.onclick = () => cheer(Number(btn.dataset.id), btn);
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+async function cheer(id, btn) {
+  btn.disabled = true;
+  say("Cheering…");
+  try {
+    const tx = await writer.cheer(id);
+    await tx.wait();
+    say("Cheered. " + tx.hash);
+    await refresh();
+  } catch (err) {
+    say(err.shortMessage || err.reason || err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("create").onsubmit = async (ev) => {
+  ev.preventDefault();
+  if (!writer) return say("Connect a wallet first.");
+  const name = $("name").value.trim();
+  if (!name) return;
+  say("Adding entry…");
+  try {
+    const tx = await writer.createEntry(name);
+    await tx.wait();
+    $("name").value = "";
+    say("Entry added.");
+    await refresh();
+  } catch (err) {
+    say(err.shortMessage || err.message);
+  }
+};
+
+$("connect").onclick = connect;
+
+refresh();
+setInterval(refresh, 8000); // re-read the chain
+setInterval(render, 200); // interpolate decay between reads
+</script>
+</body>
+</html>
