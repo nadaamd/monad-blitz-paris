@@ -34,7 +34,7 @@ cools down with zero transactions.
 |---|---|
 | Contract | [`0x79198170A856B43A564344536Fa68e1602946DC3`](https://testnet.monadexplorer.com/address/0x79198170A856B43A564344536Fa68e1602946DC3) |
 | Chain | Monad Testnet (10143) |
-| Live demo | https://nadaamd.github.io/monad-blitz-paris/ |
+| Live demo | https://heatboard-sable.vercel.app |
 
 ## Contract
 
